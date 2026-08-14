@@ -68,8 +68,20 @@ SMOOTH_CELLS = 45
 # ─────────────────────────────────────────────────────────────────────────────
 def load_grid():
     """Gitter und Geländehöhe aus der Ausgabe von fetch_hsurf.py."""
-    meta = json.loads((HERE / "hsurf_ch.json").read_text(encoding="utf-8"))
-    raw = (HERE / "hsurf_ch.bin").read_bytes()
+    meta_path = HERE / "hsurf_ch.json"
+    bin_path = HERE / "hsurf_ch.bin"
+
+    missing = [p.name for p in (meta_path, bin_path) if not p.is_file()]
+    if missing:
+        raise RuntimeError(
+            f"{', '.join(missing)} fehlt/fehlen im Repo. Diese Dateien definieren "
+            "das Zielgitter und müssen committet sein. Erzeugen: Workflow "
+            "'fetch-hsurf' starten, Artifact 'hsurf-ch' herunterladen, beide "
+            "Dateien ins Repo-Root committen."
+        )
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    raw = bin_path.read_bytes()
 
     expected = meta["nx"] * meta["ny"] * 2
     if len(raw) != expected:

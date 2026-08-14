@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-08-14T12:15:32+00:00",
+  "source": "MeteoSwiss ICON-CH1-EPS horizontal_constants (HSURF)",
+  "source_collection": "ch.meteoschweiz.ogd-forecasting-icon-ch1",
+  "licence": "MeteoSwiss Open Government Data",
+  "variable": "surface_altitude",
+  "unit": "m",
+  "dtype": "int16",
+  "byte_order": "little",
+  "nodata": -32768,
+  "row_order": "north_to_south",
+  "col_order": "west_to_east",
+  "note": "Zeile 0 ist der noerdlichste Streifen. Werte sind Zellmittelpunkte: lat = north - (row + 0.5) * dlat, lon = west + (col + 0.5) * dlon.",
+  "bbox": {
+    "west": 5.9,
+    "south": 45.75,
+    "east": 10.55,
+    "north": 47.85
+  },
+  "nx": 354,
+  "ny": 234,
+  "dlon": 0.01312271,
+  "dlat": 0.00898311,
+  "grid_km": 1.0,
+  "bytes": 165672
+}
