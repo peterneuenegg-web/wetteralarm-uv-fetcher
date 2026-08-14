@@ -178,12 +178,22 @@ def download_cams(date_str: str, run_time: str, leadtimes: list[int], dest: Path
         raise RuntimeError("CAMS-Download leer")
 
 
-def pick_var(ds, *needles):
-    """Variablenname im NetCDF finden — CAMS benennt teils um."""
-    for name in ds.data_vars:
-        low = name.lower()
-        if all(n in low for n in needles):
-            return name
+def pick_var(ds, *candidates):
+    """
+    Variablenname im NetCDF finden — CAMS benennt teils um.
+
+    EXAKTE Treffer zuerst: "uvbed" steckt als Teilstring in "uvbedcs", eine
+    reine Teilstringsuche liefert also für beide dasselbe Feld. Genau das ist
+    im ersten Lauf passiert — die Kontrollrechnung verglich das Klarhimmel-Feld
+    mit sich selbst und wäre immer aufgegangen.
+    """
+    for c in candidates:
+        if c in ds.data_vars:
+            return c
+    for c in candidates:
+        for name in ds.data_vars:
+            if c in name.lower():
+                return name
     return None
 
 
@@ -231,20 +241,41 @@ def _ogd():
 
 
 def icon_latest_ref(collection_id: str) -> str:
-    """Neuesten verfügbaren Lauf aus dem STAC-Katalog lesen."""
+    """
+    Neuesten real nutzbaren Lauf bestimmen.
+
+    NICHT `items?limit=1` — die STAC liefert unsortiert, und `sortby` wird von
+    dieser Instanz nicht unterstützt. Man bekommt dann irgendeinen, oft alten
+    Lauf, dessen frühe Schritte bereits gelöscht sind (die Collection hält nur
+    rund 24 h vor). Der Abruf scheitert danach mit einem nichtssagenden
+    "list index out of range" aus meteodata-lab.
+
+    Stattdessen wie in weitsicht-forecast-fetcher: nach Items mit Gültigkeit im
+    aktuellen Zeitfenster fragen — jeder aktive Lauf hat solche — und davon die
+    grösste reference_datetime nehmen.
+    """
+    now = datetime.now(timezone.utc)
+    start = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (now + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     url = (f"https://data.geo.admin.ch/api/stac/v1/collections/"
-           f"{collection_id}/items?limit=1")
+           f"{collection_id}/items?limit=100&datetime={start}/{end}")
     r = requests.get(url, timeout=60)
     r.raise_for_status()
-    feats = r.json().get("features", [])
-    if not feats:
-        raise RuntimeError(f"kein Lauf in {collection_id}")
 
-    props = feats[0].get("properties", {})
-    ref = props.get("forecast:reference_datetime") or props.get("datetime")
-    if not ref:
-        raise RuntimeError(f"keine reference_datetime in {collection_id}")
-    return str(ref).split("/")[0]
+    refs = set()
+    for f in r.json().get("features", []):
+        rd = (f.get("properties") or {}).get("forecast:reference_datetime")
+        if rd:
+            refs.add(str(rd).split("/")[0].replace("+00:00", "Z"))
+
+    if not refs:
+        raise RuntimeError(f"kein aktiver Lauf in {collection_id} ({url})")
+
+    latest = max(refs)
+    log.info("%s: neuester nutzbarer Lauf %s (von %d im Fenster)",
+             collection_id.split("-")[-1], latest, len(refs))
+    return latest
 
 
 def icon_field(variable: str, collection, ref_iso: str, horizon: timedelta,
@@ -414,12 +445,23 @@ def main() -> int:
                      t["date"], label, float(np.nanmin(rel)), float(np.nanmax(rel)),
                      float(np.nanmean(rel)))
         except Exception as e:                                   # noqa: BLE001
-            log.error("ICON für %s fehlgeschlagen: %s", t["date"], e)
-            return 1
+            # Einzelne Tage dürfen ausfallen — ein fehlender Modellschritt darf
+            # nicht die bereits gerechneten Tage mitreissen. Das Widget fällt
+            # für solche Tage auf die POI-Interpolation zurück.
+            log.error("ICON für %s fehlgeschlagen (%s) — Tag wird übersprungen: %s",
+                      t["date"], label, e)
+            t["failed"] = True
 
     # ---------- Modell ----------
+    usable = [t for t in targets if not t.get("failed")]
+    if not usable:
+        log.error("Kein einziger Tag konnte gerechnet werden.")
+        return 1
+    if len(usable) < len(targets):
+        log.warning("%d von %d Tagen gerechnet.", len(usable), len(targets))
+
     payload_days = []
-    for t in targets:
+    for t in usable:
         uvi = np.zeros_like(t["uv_cs"])
         it = np.nditer(uvi, flags=["multi_index"], op_flags=["writeonly"])
         while not it.finished:
@@ -488,9 +530,15 @@ def main() -> int:
 def send(out_meta: dict, days: list[dict]) -> int:
     url = os.environ.get("UV_INGEST_URL", "").strip()
     token = os.environ.get("UV_INGEST_TOKEN", "").strip()
+
     if not url or not token:
-        log.error("UV_INGEST_URL / UV_INGEST_TOKEN fehlen.")
-        return 2
+        # Kein Fehler: Die Rechnung ist fertig, es fehlt nur das Ziel. Der Lauf
+        # verhält sich dann wie ein Trockenlauf — das Ergebnis liegt als
+        # Artifact bereit. Ein Abbruch mit Fehlercode würde einen geglückten
+        # Lauf als gescheitert markieren.
+        log.warning("UV_INGEST_URL / UV_INGEST_TOKEN nicht gesetzt — "
+                    "Ergebnis nur als Artifact, kein Versand.")
+        return 0
 
     files = {"meta": ("uvraster_meta.json",
                       json.dumps(out_meta).encode("utf-8"), "application/json")}

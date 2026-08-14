@@ -13,17 +13,21 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "stage oder production"
+        description: "Zielumgebung"
         required: false
-        default: "stage"
+        type: choice
+        default: stage
+        options: [stage, production]
       forecast_days:
         description: "Anzahl Prognosetage (CAMS/ICON-CH2 reichen 5)"
         required: false
+        type: string
         default: "5"
       dry_run:
-        description: "true = rechnen und Artifact hochladen, nicht senden"
+        description: "Nur rechnen, Ergebnis als Artifact — nicht an den Server senden"
         required: false
-        default: "false"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
