@@ -106,21 +106,66 @@ python fetch_hsurf.py
 Braucht Python 3.10–3.12 (**nicht** 3.13, `meteodata-lab 0.7.2` unterstützt es
 nicht). Kein Token nötig — die OGD-Daten sind offen.
 
-## Stufe 2 — eigenes UV-Feld (geplant, noch nicht umgesetzt)
+## Stufe 2 — eigenes UV-Feld (Code steht, ungetestet)
 
-Idee: UV-Index flächig rechnen statt aus Talstationen interpolieren.
+Rechnet den UV-Index flächig statt ihn aus Talstationen zu interpolieren.
+Vollständige Spezifikation im UV-Projekt: `Doku/SPEC_uv-raster.md`.
+
+```
+UVI = UVI_klar(CAMS) · Höhenterm(HSURF) · Bewölkung(DURSUN) · Schnee(SNOWC)
+```
 
 | Baustein | Quelle | Auflösung |
 |---|---|---|
-| Grossräumiges UV-Niveau (Ozon, Sonnenstand, Aerosol) | CAMS `uv_biologically_effective_dose` | ~45 km |
-| Bewölkung | ICON `CLCT` | 1 km (CH1) / 2,1 km (CH2) |
+| UV klar (Ozon, Sonnenstand, Aerosol) | CAMS `uv_biologically_effective_dose_clear_sky` | ~45 km |
+| Bewölkung | ICON `DURSUN` / `DURSUN_M` | 1 km / 2,1 km |
 | Höhe | `HSURF` aus Stufe 1 | 1 km |
+| Schnee | ICON `SNOWC` | 1 km / 2,1 km |
 
-Vorgesehene Modellwahl: **ICON-CH1 für Tag 1** (33 h Horizont, 1 km),
-**ICON-CH2 für die Folgetage** (120 h, 2,1 km).
+Modellwahl je Tag: **ICON-CH1 für Tag 1** (33 h Horizont, 1 km),
+**ICON-CH2 für Tag 2–5** (120 h, 2,1 km). Weiter als 5 Tage reicht keine der
+beiden Quellen.
 
-Offen: Kalibrierung gegen die MeteoSchweiz-UV-Werte, Ablage- und
-Ingest-Format, Trigger-Anbindung.
+### Dateien
+
+| Datei | Zweck |
+|---|---|
+| `uv_model.py` | Reine Rechenlogik, **kein Netzzugriff** |
+| `test_uv_model.py` | 27 Zusicherungen dazu, laufen ohne ADS und ohne eccodes |
+| `fetch_uv.py` | Abruf, Regridding, Modell, Versand |
+
+Die Physik ist bewusst von der Netzlogik getrennt: Sie ist der Teil, der
+stillschweigend falsch sein kann, und gehört deshalb prüfbar. `test_uv_model.py`
+läuft im Workflow **vor** jedem Lauf.
+
+### Voraussetzung
+
+`fetch_uv.py` liest `hsurf_ch.bin` und `hsurf_ch.json` aus diesem Repo — sie
+definieren das Zielgitter. Sie müssen also committet sein (Ergebnis von
+`fetch-hsurf`), sonst bricht der Lauf sofort ab.
+
+### Secrets
+
+| Secret | Zweck |
+|---|---|
+| `ADS_API_KEY` | Copernicus-ADS-Token. **Konto geteilt mit Weitsicht** — bei Rotation beide Repos nachziehen |
+| `UV_INGEST_URL_STAGE` / `_PROD` | Ziel-Endpoint `…/api/raster-ingest.php` |
+| `UV_INGEST_TOKEN_STAGE` / `_PROD` | Muss `RASTER_INGEST_TOKEN` in der Infomaniak-`.env` matchen |
+
+### Erster Lauf
+
+Mit `dry_run: true` starten. Dann wird gerechnet und als Artifact
+hochgeladen, aber nichts gesendet. Im Log prüfen:
+
+- `CAMS NetCDF: vars=…` — heissen die Variablen wie erwartet?
+- `rel_sun … (Mittel …)` — plausibel zwischen 0 und 1?
+- `UVI {min, max, mean}` — Mittelland im Hochsommer 6–8, Gipfel 9–11?
+- `Flächenmittel eigen … vs CAMS bewölkt …` — **Faktor sollte nahe 1 liegen.**
+  Weicht er stark ab, stimmt der Bewölkungsfaktor oder die Einheitenumrechnung
+  nicht. Die ADS-Doku nennt die Einheit von `uvbedcs` „dimensionless", der
+  Code rechnet mit W/m² und Faktor 40 — genau das ist hier zu verifizieren.
+
+Erst wenn diese vier Punkte stimmen, ohne `dry_run` laufen lassen.
 
 ## Betrieb
 

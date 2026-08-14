@@ -1,0 +1,74 @@
+name: fetch-uv
+
+# Rechnet das UV-Raster (Stufe 2) und liefert es an das UV-Backend.
+#
+# BEWUSST OHNE `schedule:` — GitHub deaktiviert in öffentlichen Repos
+# *geplante* Workflows nach 60 Tagen ohne Repository-Aktivität, und der
+# GitHub-Cron ist Best-Effort (im Hagel-Worker real 1–3 h Verspätung bei
+# einem 5-Minuten-Schedule). Ausgelöst wird stattdessen vom Infomaniak-Cron
+# des UV-Projekts per workflow_dispatch — Vorlage
+# Weitsicht/cron/trigger_forecast_fetcher.php.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "stage oder production"
+        required: false
+        default: "stage"
+      forecast_days:
+        description: "Anzahl Prognosetage (CAMS/ICON-CH2 reichen 5)"
+        required: false
+        default: "5"
+      dry_run:
+        description: "true = rechnen und Artifact hochladen, nicht senden"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Actions auf vollen Commit-SHA gepinnt (Tag-Reuse-Risiko).
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065   # v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Die Physik zuerst — ein Rechenfehler soll nicht erst im Kartenbild
+      # auffallen. Läuft ohne Netz und ohne ADS-Zugang.
+      - name: Modelltests
+        run: python test_uv_model.py
+
+      - name: Build UV raster
+        env:
+          ADS_API_KEY: ${{ secrets.ADS_API_KEY }}
+          ADS_URL: ${{ secrets.ADS_URL }}
+          UV_INGEST_URL: ${{ inputs.target == 'production' && secrets.UV_INGEST_URL_PROD || secrets.UV_INGEST_URL_STAGE }}
+          UV_INGEST_TOKEN: ${{ inputs.target == 'production' && secrets.UV_INGEST_TOKEN_PROD || secrets.UV_INGEST_TOKEN_STAGE }}
+          FORECAST_DAYS: ${{ inputs.forecast_days }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python fetch_uv.py
+
+      # Immer hochladen, auch bei Fehlschlag — die Zwischenergebnisse sind
+      # das Einzige, woran sich ein Fehllauf nachvollziehen lässt.
+      - name: Upload raster
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4
+        with:
+          name: uv-raster
+          path: |
+            uvraster_*.bin
+            uvraster_meta.json
+          if-no-files-found: warn
