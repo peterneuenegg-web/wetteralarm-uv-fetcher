@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 
 from uv_model import (
+    CMF_MIN,
     UVBED_TO_UVI,
     altitude_factor,
     cloud_modification_factor,
@@ -68,8 +69,12 @@ check("Nacht (Nenner 0) ergibt 0",
 
 print("\nBewoelkungsfaktor")
 check("klar -> 1.0", close(cloud_modification_factor(1.0), 1.0))
-check("bedeckt -> Sockel 0.25", close(cloud_modification_factor(0.0), 0.25))
-check("halb -> 0.625", close(cloud_modification_factor(0.5), 0.625))
+check("bedeckt -> Sockel", close(cloud_modification_factor(0.0), CMF_MIN))
+check("halb -> Mitte zwischen Sockel und 1",
+      close(cloud_modification_factor(0.5), CMF_MIN + (1 - CMF_MIN) * 0.5))
+# Der Sockel ist gegen CAMS kalibriert; Literatur nennt 30-50 % Restdurchlass.
+check("Sockel im plausiblen Bereich 0.30..0.55", 0.30 <= CMF_MIN <= 0.55,
+      f"{CMF_MIN}")
 check("monoton steigend",
       all(cloud_modification_factor(i / 10) < cloud_modification_factor((i + 1) / 10)
           for i in range(10)))
@@ -100,7 +105,7 @@ u_high = uv_index(uvbed_8, 3300, 1300, 1.0, 0.0)
 check("2000 m hoeher -> +14 %", close(u_high, 8.0 * 1.14, 1e-9), f"{u_high:.3f}")
 
 u_cloud = uv_index(uvbed_8, 1300, 1300, 0.0, 0.0)
-check("bedeckt -> auf Sockel", close(u_cloud, 8.0 * 0.25, 1e-9), f"{u_cloud:.3f}")
+check("bedeckt -> auf Sockel", close(u_cloud, 8.0 * CMF_MIN, 1e-9), f"{u_cloud:.3f}")
 
 u_snow = uv_index(uvbed_8, 1300, 1300, 1.0, 100.0)
 check("volle Schneedecke -> +25 %", close(u_snow, 10.0, 1e-9), f"{u_snow:.3f}")

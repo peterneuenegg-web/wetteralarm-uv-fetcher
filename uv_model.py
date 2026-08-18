@@ -20,7 +20,17 @@ ALTITUDE_GRADIENT = 0.07
 # Bewölkungsfaktor in Ångström-Form: CMF = CMF_MIN + (1-CMF_MIN) · rel_sun.
 # Der Sockel bildet ab, dass UV auch bei geschlossener Decke durch Streuung
 # den Boden erreicht — UV wird deutlich weniger gedämpft als Gesamtstrahlung.
-CMF_MIN = 0.25
+#
+# KALIBRIERT am 2026-08-18 gegen CAMS: Aus dem Verhältnis uvbed/uvbedcs lässt
+# sich der Bewölkungsfaktor ablesen, den CAMS selbst ansetzt. Über fünf Tage
+# mit rel_sun von 0.06 bis 0.99 ergibt die Kleinste-Quadrate-Anpassung einen
+# Sockel von 0.47 (RMS 0.062). Der ursprüngliche Schätzwert 0.25 dämpfte bei
+# geschlossener Decke etwa doppelt so stark wie CAMS und lag auch unter dem
+# Literaturbereich (UV unter Bewölkung typisch 30–50 % des Klarhimmelwerts).
+#
+# Nachkalibrieren, wenn mehr Tage vorliegen: Die Zeile "Bewölkungsfaktor:
+# CAMS x vs eigen y" im Worker-Log ist die Datengrundlage.
+CMF_MIN = 0.47
 
 # Zuschlag bei vollständiger Schneedecke (Albedo-Rückstreuung).
 SNOW_ALBEDO_BONUS = 0.25
