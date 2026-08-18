@@ -39,7 +39,8 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from uv_model import encode_byte, solar_noon_utc_hour, uv_index
+from uv_model import (cloud_modification_factor, encode_byte,
+                      solar_noon_utc_hour, uv_index)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -528,12 +529,17 @@ def main() -> int:
             # Liegen beide nah beieinander, ist die Abweichung anderswo.
             cs_mean = float(np.mean(t["uv_cs"]))
             cmf_cams = float(np.mean(t["uv_all"])) / cs_mean if cs_mean else float("nan")
-            cmf_own = float(np.mean(0.25 + 0.75 * t["rel_sun"]))
+            # ÜBER uv_model, nicht nachgebaut: Eine zweite Formel hier driftet
+            # bei jeder Kalibrierung auseinander und meldet dann Werte, die das
+            # Modell gar nicht verwendet.
+            cmf_own = float(np.mean(
+                np.vectorize(cloud_modification_factor)(t["rel_sun"])))
             log.info("  Bewölkungsfaktor: CAMS %.2f vs eigen %.2f (rel_sun Mittel %.2f)",
                      cmf_cams, cmf_own, float(np.mean(t["rel_sun"])))
 
         payload_days.append({"date": t["date"], "model": t["model"],
-                             "file": fname, **stats})
+                             "file": fname, "field": f"raster{len(payload_days)}",
+                             **stats})
 
     out_meta = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -573,11 +579,15 @@ def send(out_meta: dict, days: list[dict]) -> int:
                     "Ergebnis nur als Artifact, kein Versand.")
         return 0
 
+    # Feldnamen bewusst ohne Punkt und Bindestrich: PHP ersetzt "." im
+    # Feldnamen durch "_", bevor $_FILES aufgebaut wird. Ein Feld namens
+    # "uvraster_2026-08-18.bin" kommt dort als "uvraster_2026-08-18_bin" an und
+    # gilt als fehlend. Der Bezug läuft deshalb über meta["days"][i]["field"].
     files = {"meta": ("uvraster_meta.json",
                       json.dumps(out_meta).encode("utf-8"), "application/json")}
     for d in days:
-        files[d["file"]] = (d["file"], (HERE / d["file"]).read_bytes(),
-                            "application/octet-stream")
+        files[d["field"]] = (d["file"], (HERE / d["file"]).read_bytes(),
+                             "application/octet-stream")
 
     r = requests.post(url, files=files, headers={"X-Ingest-Token": token}, timeout=180)
     log.info("Ingest: HTTP %s — %s", r.status_code, r.text[:300])
