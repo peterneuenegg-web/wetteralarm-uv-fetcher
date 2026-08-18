@@ -202,11 +202,20 @@ def cams_field(ds, varname: str, lead_index: int, lats, lons) -> np.ndarray:
     da = ds[varname]
 
     # Lead-Dimension herausgreifen, alle übrigen Nicht-Raum-Dims auf 0.
+    #
+    # ACHTUNG: lead_index darf NUR beim Reduzieren der Lead-Dimension
+    # verbraucht werden. Wird er nach jeder Dimension zurückgesetzt, hängt das
+    # Ergebnis von der Reihenfolge der Dimensionen im NetCDF ab — kommt
+    # forecast_reference_time zuerst, liefern alle Tage stillschweigend den
+    # Wert von Tag 1.
+    LEAD_DIMS = ("forecast_period", "step", "time", "valid_time")
     for dim in list(da.dims):
         if dim in ("latitude", "lat", "longitude", "lon"):
             continue
-        da = da.isel({dim: min(lead_index, da.sizes[dim] - 1)}) if dim in ("forecast_period", "step", "time", "valid_time") else da.isel({dim: 0})
-        lead_index = 0
+        if dim in LEAD_DIMS:
+            da = da.isel({dim: min(lead_index, da.sizes[dim] - 1)})
+        else:
+            da = da.isel({dim: 0})
 
     src_lat = np.asarray(da["latitude" if "latitude" in da.coords else "lat"].values, dtype=np.float64)
     src_lon = np.asarray(da["longitude" if "longitude" in da.coords else "lon"].values, dtype=np.float64)
@@ -260,21 +269,33 @@ def icon_latest_ref(collection_id: str) -> str:
 
     url = (f"https://data.geo.admin.ch/api/stac/v1/collections/"
            f"{collection_id}/items?limit=100&datetime={start}/{end}")
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
 
+    # Blättern: Ein einzelner Lauf hat sehr viele Items (je Variable und
+    # Vorlaufzeit eines). 100 Treffer stammen deshalb leicht alle aus EINEM,
+    # womöglich alten Lauf — dann bekommt man ohne Fehlermeldung eine
+    # veraltete Prognose. Mehrere Seiten holen und daraus das Maximum nehmen.
     refs = set()
-    for f in r.json().get("features", []):
-        rd = (f.get("properties") or {}).get("forecast:reference_datetime")
-        if rd:
-            refs.add(str(rd).split("/")[0].replace("+00:00", "Z"))
+    pages = 0
+    while url and pages < 8:
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+        body = r.json()
+
+        for f in body.get("features", []):
+            rd = (f.get("properties") or {}).get("forecast:reference_datetime")
+            if rd:
+                refs.add(str(rd).split("/")[0].replace("+00:00", "Z"))
+
+        url = next((l.get("href") for l in body.get("links", [])
+                    if l.get("rel") == "next"), None)
+        pages += 1
 
     if not refs:
         raise RuntimeError(f"kein aktiver Lauf in {collection_id} ({url})")
 
     latest = max(refs)
-    log.info("%s: neuester nutzbarer Lauf %s (von %d im Fenster)",
-             collection_id.split("-")[-1], latest, len(refs))
+    log.info("%s: neuester nutzbarer Lauf %s (von %d Läufen, %d Seiten)",
+             collection_id.split("-")[-1], latest, len(refs), pages)
     return latest
 
 
@@ -498,6 +519,18 @@ def main() -> int:
             log.info("  Flächenmittel eigen %.2f vs CAMS bewölkt %.2f (Faktor %.2f)",
                      stats["mean"], cams_mean,
                      stats["mean"] / cams_mean if cams_mean else float("nan"))
+
+            # Wessen Bewölkung? Weichen die Flächenmittel auseinander, liegt es
+            # fast immer am Bewölkungsfaktor — und dann ist entscheidend, ob
+            # ICON und CAMS überhaupt dieselbe Wetterlage sehen.
+            #   cmf_cams = uvbed / uvbedcs   (die Dämpfung, die CAMS selbst ansetzt)
+            #   cmf_eigen = 0.25 + 0.75 * rel_sun
+            # Liegen beide nah beieinander, ist die Abweichung anderswo.
+            cs_mean = float(np.mean(t["uv_cs"]))
+            cmf_cams = float(np.mean(t["uv_all"])) / cs_mean if cs_mean else float("nan")
+            cmf_own = float(np.mean(0.25 + 0.75 * t["rel_sun"]))
+            log.info("  Bewölkungsfaktor: CAMS %.2f vs eigen %.2f (rel_sun Mittel %.2f)",
+                     cmf_cams, cmf_own, float(np.mean(t["rel_sun"])))
 
         payload_days.append({"date": t["date"], "model": t["model"],
                              "file": fname, **stats})
