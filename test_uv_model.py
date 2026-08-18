@@ -14,6 +14,7 @@ from uv_model import (
     UVBED_TO_UVI,
     altitude_factor,
     cloud_modification_factor,
+    cloud_modification_factor_from_cover,
     deaccumulate,
     encode_byte,
     equation_of_time_minutes,
@@ -79,6 +80,22 @@ check("monoton steigend",
       all(cloud_modification_factor(i / 10) < cloud_modification_factor((i + 1) / 10)
           for i in range(10)))
 
+print("\nBewoelkungsfaktor aus Bedeckungsgrad")
+check("0 % Bedeckung -> 1.0", close(cloud_modification_factor_from_cover(0), 1.0))
+check("100 % -> Sockel", close(cloud_modification_factor_from_cover(100), CMF_MIN))
+check("50 % -> Mitte", close(cloud_modification_factor_from_cover(50),
+                             1.0 - (1.0 - CMF_MIN) * 0.5))
+check("ueber 100 % geklemmt", close(cloud_modification_factor_from_cover(150), CMF_MIN))
+check("negativ geklemmt", close(cloud_modification_factor_from_cover(-10), 1.0))
+check("monoton fallend",
+      all(cloud_modification_factor_from_cover(i * 10)
+          > cloud_modification_factor_from_cover((i + 1) * 10) for i in range(10)))
+# Gleiche Endpunkte wie die Sonnenscheindauer-Variante — die Kalibrierung
+# gegen CAMS gilt damit unveraendert weiter.
+check("Endpunkte deckungsgleich mit rel_sun-Variante",
+      close(cloud_modification_factor_from_cover(0), cloud_modification_factor(1.0))
+      and close(cloud_modification_factor_from_cover(100), cloud_modification_factor(0.0)))
+
 print("\nHoehenfaktor")
 check("auf Referenzhoehe neutral", close(altitude_factor(1500, 1500), 1.0))
 check("1000 m ueber Referenz -> +7 %", close(altitude_factor(2500, 1500), 1.07))
@@ -98,24 +115,24 @@ print("\nUV-Index gesamt")
 # Klarhimmel-Dosisleistung, die einem UVI 8 auf Referenzhoehe entspricht.
 uvbed_8 = 8.0 / UVBED_TO_UVI
 
-u = uv_index(uvbed_8, 1300, 1300, 1.0, 0.0)
+u = uv_index(uvbed_8, 1300, 1300, 0.0, 0.0)   # 0 % Bedeckung = klar
 check("klar, auf Referenzhoehe, kein Schnee -> UVI 8", close(u, 8.0, 1e-9), f"{u:.3f}")
 
-u_high = uv_index(uvbed_8, 3300, 1300, 1.0, 0.0)
+u_high = uv_index(uvbed_8, 3300, 1300, 0.0, 0.0)
 check("2000 m hoeher -> +14 %", close(u_high, 8.0 * 1.14, 1e-9), f"{u_high:.3f}")
 
-u_cloud = uv_index(uvbed_8, 1300, 1300, 0.0, 0.0)
+u_cloud = uv_index(uvbed_8, 1300, 1300, 100.0, 0.0)   # voll bedeckt
 check("bedeckt -> auf Sockel", close(u_cloud, 8.0 * CMF_MIN, 1e-9), f"{u_cloud:.3f}")
 
-u_snow = uv_index(uvbed_8, 1300, 1300, 1.0, 100.0)
+u_snow = uv_index(uvbed_8, 1300, 1300, 0.0, 100.0)
 check("volle Schneedecke -> +25 %", close(u_snow, 10.0, 1e-9), f"{u_snow:.3f}")
 
 check("Schnee abschaltbar",
-      close(uv_index(uvbed_8, 1300, 1300, 1.0, 100.0, use_snow=False), 8.0, 1e-9))
-check("nie negativ", uv_index(0.0, 0, 4000, 0.0, 0.0) >= 0.0)
+      close(uv_index(uvbed_8, 1300, 1300, 0.0, 100.0, use_snow=False), 8.0, 1e-9))
+check("nie negativ", uv_index(0.0, 0, 4000, 100.0, 0.0) >= 0.0)
 
 # Groessenordnung: Gipfel im Hochsommer, klar, mit Schnee.
-peak = uv_index(9.0 / UVBED_TO_UVI, 3500, 1300, 1.0, 80.0)
+peak = uv_index(9.0 / UVBED_TO_UVI, 3500, 1300, 0.0, 80.0)
 check("Gipfelwert im plausiblen Bereich 10..14", 10.0 <= peak <= 14.0, f"{peak:.2f}")
 
 print("\nByte-Kodierung")

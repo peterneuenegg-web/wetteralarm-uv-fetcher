@@ -32,6 +32,10 @@ ALTITUDE_GRADIENT = 0.07
 # CAMS x vs eigen y" im Worker-Log ist die Datengrundlage.
 CMF_MIN = 0.47
 
+# Kennlinie zwischen Bedeckungsgrad und Dämpfung. 1.0 = linear.
+# > 1 dämpft dünne Bewölkung schwächer, < 1 stärker.
+CMF_EXPONENT = 1.0
+
 # Zuschlag bei vollständiger Schneedecke (Albedo-Rückstreuung).
 SNOW_ALBEDO_BONUS = 0.25
 
@@ -93,8 +97,35 @@ def relative_sunshine(dursun_t1: float, dursun_t2: float,
     return min(1.0, actual / possible)
 
 
+def cloud_modification_factor_from_cover(cloud_cover_percent: float,
+                                         exponent: float = CMF_EXPONENT) -> float:
+    """
+    Bewölkungsfaktor aus dem Bedeckungsgrad (ICON CLCT, Prozent).
+
+    Endpunkte wie bei der Sonnenscheindauer-Variante: 0 % Bedeckung → 1.0,
+    100 % → CMF_MIN. Die gegen CAMS gefundene Kalibrierung gilt damit weiter.
+
+    WARUM DIESE VARIANTE: CLCT ist ein Momentanwert. Der Weg über DURSUN
+    brauchte die Differenz zweier seit Modellstart kumulierter Felder — bei
+    fünf Tagen Vorlauf sind das mehrere Hunderttausend Sekunden, aus denen ein
+    Zwei-Stunden-Fenster herausgerechnet werden musste. Das ging in der
+    Auflösung der gepackten GRIB-Werte unter: Gemessen am 2026-08-18 fiel
+    `rel_sun` an Tag 5 landesweit auf 0.02, das Feld wurde flach (Streuung 0.31
+    gegenüber 0.89 der Vergleichsquelle) und war mit jeder anderen Quelle
+    unkorreliert (r = -0.08). Bei kurzem Vorlauf funktionierte es, bei langem
+    war es Rauschen. Ohne Differenzbildung entfällt das Problem.
+    """
+    c = min(100.0, max(0.0, cloud_cover_percent)) / 100.0
+    return 1.0 - (1.0 - CMF_MIN) * (c ** exponent)
+
+
 def cloud_modification_factor(rel_sunshine: float) -> float:
-    """Bewölkungsfaktor aus relativer Sonnenscheindauer."""
+    """
+    Bewölkungsfaktor aus relativer Sonnenscheindauer.
+
+    VERALTET für lange Vorlaufzeiten — siehe
+    cloud_modification_factor_from_cover(). Bleibt für Tests und als Referenz.
+    """
     r = min(1.0, max(0.0, rel_sunshine))
     return CMF_MIN + (1.0 - CMF_MIN) * r
 
@@ -124,7 +155,7 @@ def snow_factor(snow_cover_percent: float,
 
 
 def uv_index(uvbed_clearsky: float, height_m: float, reference_height_m: float,
-             rel_sunshine: float, snow_cover_percent: float,
+             cloud_cover_percent: float, snow_cover_percent: float,
              use_snow: bool = True) -> float:
     """
     UV-Index für eine Rasterzelle.
@@ -132,12 +163,12 @@ def uv_index(uvbed_clearsky: float, height_m: float, reference_height_m: float,
     :param uvbed_clearsky: CAMS uvbedcs in W/m²
     :param height_m: Geländehöhe aus ICON HSURF
     :param reference_height_m: geglättete Höhe auf CAMS-Skala
-    :param rel_sunshine: relative Sonnenscheindauer 0..1
+    :param cloud_cover_percent: ICON CLCT in Prozent
     :param snow_cover_percent: ICON SNOWC in Prozent
     """
     uvi = UVBED_TO_UVI * uvbed_clearsky
     uvi *= altitude_factor(height_m, reference_height_m)
-    uvi *= cloud_modification_factor(rel_sunshine)
+    uvi *= cloud_modification_factor_from_cover(cloud_cover_percent)
 
     if use_snow:
         uvi *= snow_factor(snow_cover_percent)

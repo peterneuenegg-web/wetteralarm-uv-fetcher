@@ -5,7 +5,7 @@ UV-Raster (Stufe 2) — CAMS + ICON → 1-km-UV-Index-Feld für die Schweiz.
 Rechnet den UV-Index flächendeckend, statt ihn aus Ortschaften zu
 interpolieren. Modell und Begründung: UV/Doku/SPEC_uv-raster.md.
 
-    UVI = UVI_klar(CAMS) · Höhenterm(ICON HSURF) · Bewölkung(ICON DURSUN) · Schnee
+    UVI = UVI_klar(CAMS) · Höhenterm(ICON HSURF) · Bewölkung(ICON CLCT) · Schnee
 
 Ausgabe je Prognosetag eine uint8-Rasterdatei auf demselben Gitter wie
 hsurf_ch.bin, danach POST an den Ingest-Endpoint des UV-Projekts.
@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from uv_model import (cloud_modification_factor, encode_byte,
+from uv_model import (cloud_modification_factor_from_cover, encode_byte,
                       solar_noon_utc_hour, uv_index)
 
 logging.basicConfig(
@@ -55,10 +55,6 @@ CH_AREA = [48.0, 5.5, 45.5, 11.0]          # N, W, S, E für CAMS
 CAMS_DATASET = "cams-global-atmospheric-composition-forecasts"
 VAR_UV_CS = "uv_biologically_effective_dose_clear_sky"
 VAR_UV_ALL = "uv_biologically_effective_dose"
-
-# Fenster um den Sonnenhöchststand, über das die Sonnenscheindauer
-# ausgewertet wird. Ein Punktwert wäre anfällig für einzelne Wolken.
-SUN_WINDOW_HOURS = 1
 
 # Referenzhöhe: HSURF auf CAMS-Skala geglättet. 45 km bei ~1 km Zellen.
 SMOOTH_CELLS = 45
@@ -440,32 +436,26 @@ def main() -> int:
             coll, ref_dt, label = Collection.ICON_CH2, ref_ch2_dt, "ICON-CH2"
 
         h_mid = t["target"] - ref_dt
-        h_lo = h_mid - timedelta(hours=SUN_WINDOW_HOURS)
-        h_hi = h_mid + timedelta(hours=SUN_WINDOW_HOURS)
-
-        if h_lo.total_seconds() < 0:
-            h_lo = timedelta(0)
+        if h_mid.total_seconds() < 0:
+            h_mid = timedelta(0)
 
         try:
-            d1 = icon_field("DURSUN", coll, ref_dt.isoformat(), h_lo, lats, lons, tree_cache)
-            d2 = icon_field("DURSUN", coll, ref_dt.isoformat(), h_hi, lats, lons, tree_cache)
-            m1 = icon_field("DURSUN_M", coll, ref_dt.isoformat(), h_lo, lats, lons, tree_cache)
-            m2 = icon_field("DURSUN_M", coll, ref_dt.isoformat(), h_hi, lats, lons, tree_cache)
-
-            possible = np.maximum(m2 - m1, 0.0)
-            actual = np.maximum(d2 - d1, 0.0)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                rel = np.where(possible > 0, np.clip(actual / possible, 0.0, 1.0), 0.0)
+            # CLCT ist ein Momentanwert — genau ein Feld je Tag, keine
+            # Differenzbildung. Der frühere Weg über DURSUN/DURSUN_M brauchte
+            # vier Felder und die Differenz zweier kumulierter Grössen; bei
+            # langem Vorlauf war das Ergebnis Rauschen (siehe uv_model.py).
+            cloud = icon_field("CLCT", coll, ref_dt.isoformat(), h_mid, lats, lons, tree_cache)
+            cloud = np.clip(cloud, 0.0, 100.0)
 
             snow = icon_field("SNOWC", coll, ref_dt.isoformat(), h_mid, lats, lons, tree_cache) \
-                   if use_snow else np.zeros_like(rel)
+                   if use_snow else np.zeros_like(cloud)
 
             t["model"] = label
-            t["rel_sun"] = rel
+            t["cloud"] = cloud
             t["snow"] = snow
-            log.info("%s %s: rel_sun %.2f..%.2f (Mittel %.2f)",
-                     t["date"], label, float(np.nanmin(rel)), float(np.nanmax(rel)),
-                     float(np.nanmean(rel)))
+            log.info("%s %s: Bedeckung %.0f..%.0f %% (Mittel %.0f), Streuung %.1f",
+                     t["date"], label, float(np.nanmin(cloud)), float(np.nanmax(cloud)),
+                     float(np.nanmean(cloud)), float(np.nanstd(cloud)))
         except Exception as e:                                   # noqa: BLE001
             # Einzelne Tage dürfen ausfallen — ein fehlender Modellschritt darf
             # nicht die bereits gerechneten Tage mitreissen. Das Widget fällt
@@ -496,7 +486,7 @@ def main() -> int:
                     float(t["uv_cs"][y, x]),
                     float(h),
                     float(href[y, x]) if np.isfinite(href[y, x]) else float(h),
-                    float(t["rel_sun"][y, x]),
+                    float(t["cloud"][y, x]),
                     float(t["snow"][y, x]),
                     use_snow=use_snow,
                 )
@@ -525,7 +515,7 @@ def main() -> int:
             # fast immer am Bewölkungsfaktor — und dann ist entscheidend, ob
             # ICON und CAMS überhaupt dieselbe Wetterlage sehen.
             #   cmf_cams = uvbed / uvbedcs   (die Dämpfung, die CAMS selbst ansetzt)
-            #   cmf_eigen = 0.25 + 0.75 * rel_sun
+            #   cmf_eigen = 1 - (1-CMF_MIN) * (CLCT/100)
             # Liegen beide nah beieinander, ist die Abweichung anderswo.
             cs_mean = float(np.mean(t["uv_cs"]))
             cmf_cams = float(np.mean(t["uv_all"])) / cs_mean if cs_mean else float("nan")
@@ -533,9 +523,9 @@ def main() -> int:
             # bei jeder Kalibrierung auseinander und meldet dann Werte, die das
             # Modell gar nicht verwendet.
             cmf_own = float(np.mean(
-                np.vectorize(cloud_modification_factor)(t["rel_sun"])))
-            log.info("  Bewölkungsfaktor: CAMS %.2f vs eigen %.2f (rel_sun Mittel %.2f)",
-                     cmf_cams, cmf_own, float(np.mean(t["rel_sun"])))
+                np.vectorize(cloud_modification_factor_from_cover)(t["cloud"])))
+            log.info("  Bewölkungsfaktor: CAMS %.2f vs eigen %.2f (Bedeckung Mittel %.0f %%)",
+                     cmf_cams, cmf_own, float(np.mean(t["cloud"])))
 
         payload_days.append({"date": t["date"], "model": t["model"],
                              "file": fname, "field": f"raster{len(payload_days)}",
